@@ -1424,95 +1424,58 @@ func (s *moduleSourceSchema) generatedCodeWithVCSIgnoredPaths(ctx context.Contex
 	return code.WithVCSIgnoredPaths(args.Paths), nil
 }
 
-// itemType distinguishes between dependencies and toolchains in error messages and field access
-type itemType int
-
-const (
-	itemTypeDependency itemType = iota
-	itemTypeToolchain
-)
-
-func (t itemType) String() string {
-	switch t {
-	case itemTypeDependency:
-		return "dependency"
-	case itemTypeToolchain:
-		return "toolchain"
-	default:
-		return "unknown"
-	}
+// moduleRelationTypeAccessor provides unified access to dependencies or toolchains in a ModuleSource
+type moduleRelationTypeAccessor struct {
+	typ core.ModuleRelationType
 }
 
-func (t itemType) Plural() string {
-	switch t {
-	case itemTypeDependency:
-		return "dependencies"
-	case itemTypeToolchain:
-		return "toolchains"
-	default:
-		return "unknowns"
-	}
+func (a moduleRelationTypeAccessor) getItems(src *core.ModuleSource) []dagql.ObjectResult[*core.ModuleSource] {
+	return src.GetRelatedModules(a.typ)
 }
 
-// itemAccessor provides unified access to dependencies or toolchains in a ModuleSource
-type itemAccessor struct {
-	typ itemType
+func (a moduleRelationTypeAccessor) setItems(src *core.ModuleSource, items []dagql.ObjectResult[*core.ModuleSource]) {
+	src.SetRelatedModules(a.typ, items)
 }
 
-func (a itemAccessor) getItems(src *core.ModuleSource) []dagql.ObjectResult[*core.ModuleSource] {
-	if a.typ == itemTypeDependency {
-		return src.Dependencies
-	}
-	return src.Toolchains
-}
-
-func (a itemAccessor) setItems(src *core.ModuleSource, items []dagql.ObjectResult[*core.ModuleSource]) {
-	if a.typ == itemTypeDependency {
-		src.Dependencies = items
-	} else {
-		src.Toolchains = items
-	}
-}
-
-// validateAndCollectItems validates new items and returns all items (new + existing)
-func (s *moduleSourceSchema) validateAndCollectItems(
+// validateAndCollectRelatedModules validates new related modules and returns all related modules (new + existing)
+func (s *moduleSourceSchema) validateAndCollectRelatedModules(
 	parentSrc *core.ModuleSource,
-	newItems []dagql.ObjectResult[*core.ModuleSource],
-	accessor itemAccessor,
+	newRelatedModules []dagql.ObjectResult[*core.ModuleSource],
+	accessor moduleRelationTypeAccessor,
 ) ([]dagql.ObjectResult[*core.ModuleSource], error) {
-	var allItems []dagql.ObjectResult[*core.ModuleSource]
+	var allRelatedModules []dagql.ObjectResult[*core.ModuleSource]
 
-	// Validate and collect new items
-	for _, newItem := range newItems {
+	// Validate and collect new related modules
+	for _, newRelatedModule := range newRelatedModules {
 		switch parentSrc.Kind {
 		case core.ModuleSourceKindLocal:
-			switch newItem.Self().Kind {
+			switch newRelatedModule.Self().Kind {
 			case core.ModuleSourceKindLocal:
 				// parent=local, item=local
 				// local items must be located in the same context as the parent
 				contextRelPath, err := pathutil.LexicalRelativePath(
 					parentSrc.Local.ContextDirectoryPath,
-					newItem.Self().Local.ContextDirectoryPath,
+					newRelatedModule.Self().Local.ContextDirectoryPath,
 				)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get relative path from parent context to %s context: %w", accessor.typ, err)
 				}
 				if !filepath.IsLocal(contextRelPath) {
 					return nil, fmt.Errorf("local module %s context directory %q is not in parent context directory %q",
-						accessor.typ, newItem.Self().Local.ContextDirectoryPath, parentSrc.Local.ContextDirectoryPath)
+						accessor.typ, newRelatedModule.Self().Local.ContextDirectoryPath, parentSrc.Local.ContextDirectoryPath)
 				}
-				allItems = append(allItems, newItem)
+				allRelatedModules = append(allRelatedModules, newRelatedModule)
 
 			case core.ModuleSourceKindGit:
 				// parent=local, item=git
-				allItems = append(allItems, newItem)
+				allRelatedModules = append(allRelatedModules, newRelatedModule)
 
 			default:
-				return nil, fmt.Errorf("unhandled module source kind: %s", newItem.Self().Kind)
+				return nil, fmt.Errorf("unhandled module source kind: %s", newRelatedModule.Self().Kind)
 			}
 
 		case core.ModuleSourceKindGit:
-			switch newItem.Self().Kind {
+			switch newRelatedModule.Self().Kind {
 			case core.ModuleSourceKindLocal:
 				// parent=git, item=local
 				// cannot add a module source that's local to the caller as an item of a git module source
@@ -1520,10 +1483,10 @@ func (s *moduleSourceSchema) validateAndCollectItems(
 
 			case core.ModuleSourceKindGit:
 				// parent=git, item=git
-				allItems = append(allItems, newItem)
+				allRelatedModules = append(allRelatedModules, newRelatedModule)
 
 			default:
-				return nil, fmt.Errorf("unhandled module source kind: %s", newItem.Self().Kind)
+				return nil, fmt.Errorf("unhandled module source kind: %s", newRelatedModule.Self().Kind)
 			}
 
 		default:
@@ -1532,15 +1495,15 @@ func (s *moduleSourceSchema) validateAndCollectItems(
 	}
 
 	// Append pre-existing items; they need to come later so we prefer new ones over existing ones
-	allItems = append(allItems, accessor.getItems(parentSrc)...)
+	allRelatedModules = append(allRelatedModules, accessor.getItems(parentSrc)...)
 
-	return allItems, nil
+	return allRelatedModules, nil
 }
 
 // deduplicateAndSortItems deduplicates items by symbolic name, validates name uniqueness, and sorts by name
 func (s *moduleSourceSchema) deduplicateAndSortItems(
 	items []dagql.ObjectResult[*core.ModuleSource],
-	accessor itemAccessor,
+	accessor moduleRelationTypeAccessor,
 ) ([]dagql.ObjectResult[*core.ModuleSource], error) {
 	// Deduplicate equivalent items at differing versions, preferring the new item over the existing one
 	symbolicItems := make(map[string]dagql.ObjectResult[*core.ModuleSource], len(items))
@@ -1591,7 +1554,7 @@ func (s *moduleSourceSchema) moduleSourceUpdateItems(
 	ctx context.Context,
 	parentSrc dagql.ObjectResult[*core.ModuleSource],
 	updateArgs []string,
-	accessor itemAccessor,
+	accessor moduleRelationTypeAccessor,
 ) ([]core.ModuleSourceID, error) {
 	dag, err := core.CurrentDagqlServer(ctx)
 	if err != nil {
@@ -1599,8 +1562,8 @@ func (s *moduleSourceSchema) moduleSourceUpdateItems(
 	}
 
 	type updateReq struct {
-		symbolic string
-		version  string
+		symbolic string // either 1) a name of a dep or 2) the source minus any @version
+		version  string // the version to update to, if any specified
 	}
 	updateReqs := make(map[updateReq]struct{}, len(updateArgs))
 	for _, updateArg := range updateArgs {
@@ -1609,11 +1572,15 @@ func (s *moduleSourceSchema) moduleSourceUpdateItems(
 		updateReqs[req] = struct{}{}
 	}
 
+	// loop over the existing deps, checking each one for whether they should be updated based on the args
+	// this is technically O(n^2) but not expected to matter for the relatively low values of n we deal
+	// with here
 	var newUpdatedArgs []core.ModuleSourceID
 	for _, existingItem := range accessor.getItems(parentSrc.Self()) {
 		// If no update requests, implicitly update all items
 		if len(updateReqs) == 0 {
 			if existingItem.Self().Kind == core.ModuleSourceKindLocal {
+				// local dep, skip update
 				continue
 			}
 
@@ -1634,7 +1601,7 @@ func (s *moduleSourceSchema) moduleSourceUpdateItems(
 			continue
 		}
 
-		// If the existing item is local and requested to be updated, return error
+		// if the existingDep is local and requested to be updated, return error, otherwise skip it
 		if existingItem.Self().Kind == core.ModuleSourceKindLocal {
 			for updateReq := range updateReqs {
 				if updateReq.symbolic == existingItem.Self().ModuleName {
@@ -1720,7 +1687,7 @@ func (s *moduleSourceSchema) moduleSourceRemoveItems(
 	ctx context.Context,
 	parentSrc *core.ModuleSource,
 	removeArgs []string,
-	accessor itemAccessor,
+	accessor moduleRelationTypeAccessor,
 ) (*core.ModuleSource, error) {
 	parentSrc = parentSrc.Clone()
 
@@ -1805,14 +1772,14 @@ func (s *moduleSourceSchema) moduleSourceRemoveItems(
 		if keep {
 			filteredItems = append(filteredItems, existingItem)
 			// Keep config items for toolchains
-			if accessor.typ == itemTypeToolchain && i < len(parentSrc.ConfigToolchains) {
+			if accessor.typ == core.ModuleRelationTypeToolchain && i < len(parentSrc.ConfigToolchains) {
 				filteredConfigItems = append(filteredConfigItems, parentSrc.ConfigToolchains[i])
 			}
 		}
 	}
 
 	accessor.setItems(parentSrc, filteredItems)
-	if accessor.typ == itemTypeToolchain {
+	if accessor.typ == core.ModuleRelationTypeToolchain {
 		parentSrc.ConfigToolchains = filteredConfigItems
 	}
 	parentSrc.Digest = parentSrc.CalcDigest(ctx).String()
@@ -1838,10 +1805,10 @@ func (s *moduleSourceSchema) moduleSourceWithDependencies(
 		return nil, fmt.Errorf("failed to load module source dependencies from ids: %w", err)
 	}
 
-	accessor := itemAccessor{typ: itemTypeDependency}
+	accessor := moduleRelationTypeAccessor{typ: core.ModuleRelationTypeDependency}
 
 	// Validate and collect all items (new + existing)
-	allDeps, err := s.validateAndCollectItems(parentSrc, newDeps, accessor)
+	allDeps, err := s.validateAndCollectRelatedModules(parentSrc, newDeps, accessor)
 	if err != nil {
 		return nil, err
 	}
@@ -1914,10 +1881,10 @@ func (s *moduleSourceSchema) moduleSourceWithToolchains(
 		return nil, fmt.Errorf("failed to load module source toolchains from ids: %w", err)
 	}
 
-	accessor := itemAccessor{typ: itemTypeToolchain}
+	accessor := moduleRelationTypeAccessor{typ: core.ModuleRelationTypeToolchain}
 
 	// Validate and collect all items (new + existing)
-	allToolchains, err := s.validateAndCollectItems(parentSrc, newToolchains, accessor)
+	allToolchains, err := s.validateAndCollectRelatedModules(parentSrc, newToolchains, accessor)
 	if err != nil {
 		return nil, err
 	}
@@ -1965,7 +1932,7 @@ func (s *moduleSourceSchema) moduleSourceWithUpdateToolchains(
 		Toolchains []string
 	},
 ) (inst dagql.Result[*core.ModuleSource], _ error) {
-	accessor := itemAccessor{typ: itemTypeToolchain}
+	accessor := moduleRelationTypeAccessor{typ: core.ModuleRelationTypeToolchain}
 	newUpdatedArgs, err := s.moduleSourceUpdateItems(ctx, parentSrc, args.Toolchains, accessor)
 	if err != nil {
 		return inst, err
@@ -1995,7 +1962,7 @@ func (s *moduleSourceSchema) moduleSourceWithoutToolchains(
 		Toolchains []string
 	},
 ) (*core.ModuleSource, error) {
-	accessor := itemAccessor{typ: itemTypeToolchain}
+	accessor := moduleRelationTypeAccessor{typ: core.ModuleRelationTypeToolchain}
 	return s.moduleSourceRemoveItems(ctx, parentSrc, args.Toolchains, accessor)
 }
 
@@ -2111,7 +2078,7 @@ func (s *moduleSourceSchema) moduleSourceWithUpdateDependencies(
 		Dependencies []string
 	},
 ) (inst dagql.Result[*core.ModuleSource], _ error) {
-	accessor := itemAccessor{typ: itemTypeDependency}
+	accessor := moduleRelationTypeAccessor{typ: core.ModuleRelationTypeDependency}
 	newUpdatedArgs, err := s.moduleSourceUpdateItems(ctx, parentSrc, args.Dependencies, accessor)
 	if err != nil {
 		return inst, err
@@ -2141,7 +2108,7 @@ func (s *moduleSourceSchema) moduleSourceWithoutDependencies(
 		Dependencies []string
 	},
 ) (*core.ModuleSource, error) {
-	accessor := itemAccessor{typ: itemTypeDependency}
+	accessor := moduleRelationTypeAccessor{typ: core.ModuleRelationTypeDependency}
 	return s.moduleSourceRemoveItems(ctx, parentSrc, args.Dependencies, accessor)
 }
 
@@ -3168,25 +3135,22 @@ func (s *moduleSourceSchema) loadDependencyModules(ctx context.Context, src dagq
 			)
 		})
 	}
-	if err := eg.Wait(); err != nil {
-		return nil, fmt.Errorf("failed to load module dependencies: %w", err)
-	}
 
 	// Load all toolchains as dependencies
 	tcMods := make([]dagql.Result[*core.Module], len(src.Self().Toolchains))
 	if len(src.Self().Toolchains) > 0 {
-		var tceg errgroup.Group
 		for i, tcSrc := range src.Self().Toolchains {
-			tceg.Go(func() error {
+			eg.Go(func() error {
 				err := dag.Select(ctx, tcSrc, &tcMods[i],
 					dagql.Selector{Field: "asModule"},
 				)
 				return err
 			})
 		}
-		if err := tceg.Wait(); err != nil {
-			return nil, fmt.Errorf("failed to load module dependencies: %w", err)
-		}
+	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, fmt.Errorf("failed to load module dependencies: %w", err)
 	}
 
 	defaultDeps, err := query.DefaultDeps(ctx)

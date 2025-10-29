@@ -50,6 +50,36 @@ func (proto ModuleSourceKind) Type() *ast.Type {
 	}
 }
 
+// ModuleRelationType distinguishes between dependencies and toolchains in error messages and field access
+type ModuleRelationType int
+
+const (
+	ModuleRelationTypeDependency ModuleRelationType = iota
+	ModuleRelationTypeToolchain
+)
+
+func (t ModuleRelationType) String() string {
+	switch t {
+	case ModuleRelationTypeDependency:
+		return "dependency"
+	case ModuleRelationTypeToolchain:
+		return "toolchain"
+	default:
+		return "unknown"
+	}
+}
+
+func (t ModuleRelationType) Plural() string {
+	switch t {
+	case ModuleRelationTypeDependency:
+		return "dependencies"
+	case ModuleRelationTypeToolchain:
+		return "toolchains"
+	default:
+		return "unknowns"
+	}
+}
+
 func (proto ModuleSourceKind) TypeDescription() string {
 	return "The kind of module source."
 }
@@ -276,6 +306,23 @@ func (src *ModuleSource) Pin() string {
 	}
 }
 
+// GetRelatedModules returns the related modules (dependencies or toolchains) based on the type
+func (src *ModuleSource) GetRelatedModules(typ ModuleRelationType) []dagql.ObjectResult[*ModuleSource] {
+	if typ == ModuleRelationTypeDependency {
+		return src.Dependencies
+	}
+	return src.Toolchains
+}
+
+// SetRelatedModules sets the related modules (dependencies or toolchains) based on the type
+func (src *ModuleSource) SetRelatedModules(typ ModuleRelationType, modules []dagql.ObjectResult[*ModuleSource]) {
+	if typ == ModuleRelationTypeDependency {
+		src.Dependencies = modules
+	} else {
+		src.Toolchains = modules
+	}
+}
+
 func (src *ModuleSource) innerEnvFile(ctx context.Context) (*EnvFile, string, error) {
 	// We only allow loading an env file from local modules, for safety
 	if src.Kind != ModuleSourceKindLocal {
@@ -475,6 +522,19 @@ func (src *ModuleSource) CalcDigest(ctx context.Context) digest.Digest {
 			continue
 		}
 		inputs = append(inputs, dep.Self().Digest)
+	}
+
+	// Include blueprint in digest so changes to blueprint invalidate cache
+	if src.Blueprint.Self() != nil {
+		inputs = append(inputs, "blueprint:"+src.Blueprint.Self().Digest)
+	}
+
+	// Include toolchains in digest so changes to toolchains invalidate cache
+	for _, toolchain := range src.Toolchains {
+		if toolchain.Self() == nil {
+			continue
+		}
+		inputs = append(inputs, "toolchain:"+toolchain.Self().Digest)
 	}
 
 	for _, client := range src.ConfigClients {
