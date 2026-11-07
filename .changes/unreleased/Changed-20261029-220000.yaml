@@ -1,0 +1,11 @@
+kind: Changed
+body: |
+  `dagger module recommend` now scans the current directory's subtree by
+  default. Use `--path` to choose another subtree, or `--path /` to scan the
+  whole workspace. Recommendations cite the highest-level matching marker,
+  with paths relative to the workspace root. `dagger init` continues to scan
+  the whole workspace.
+time: 2026-10-29T22:00:00Z
+custom:
+  Author: ""
+  PR: ""

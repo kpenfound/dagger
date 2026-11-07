@@ -1935,7 +1935,10 @@ Find recommended modules and select which modules to install
 
 ### Synopsis
 
-Find modules for the current workspace and select which modules to install.
+Find modules in the current working directory's subtree and select which modules to install.
+Use --path to scan another subtree: relative paths resolve from the current working
+directory, and /-prefixed paths resolve from the workspace root. Use --path / to
+scan the whole workspace. Matched paths are shown relative to the workspace root.
 Already installed modules are skipped.
 
 Use --auto-apply to install all recommended modules without a prompt.
@@ -1944,6 +1947,12 @@ non-interactive mode.
 
 ```
 dagger module recommend [flags]
+```
+
+### Options
+
+```
+      --path string   Subpath to scan (defaults to the current working directory; / selects the whole workspace)
 ```
 
 ### Options inherited from parent commands

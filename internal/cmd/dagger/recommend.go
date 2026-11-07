@@ -1,10 +1,14 @@
 package daggercmd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"path"
+	"slices"
 	"sort"
+	"strings"
 
 	"dagger.io/dagger"
 	"dagger.io/dagger/core"
@@ -35,12 +39,19 @@ var recommendExcludeDirs = []string{
 }
 
 // RecommendFn returns the workspace-root-relative paths that recommend a module.
+// Only paths in the subtree at the workspace cwd are considered, including
+// before reading configuration contents.
 // An empty result means no recommendation. A nil function is never called.
 type RecommendFn func(context.Context, *core.Workspace) ([]string, error)
 
 // SimpleRecommend recommends a module when any file path pattern matches.
 func SimpleRecommend(patterns ...string) RecommendFn {
 	return func(ctx context.Context, ws *core.Workspace) ([]string, error) {
+		cwd, err := ws.Cwd(ctx)
+		if err != nil {
+			return nil, err
+		}
+		scope := strings.Trim(cwd, "/")
 		dir := recommendationDirectory(ws)
 		var matches []string
 		for _, pattern := range patterns {
@@ -52,7 +63,14 @@ func SimpleRecommend(patterns ...string) RecommendFn {
 				// Skip a failed pattern, as the registry scan did before.
 				continue
 			}
-			matches = append(matches, paths...)
+			// Keep glob patterns and exclusions relative to the workspace
+			// root. Filter candidates here, before content predicates read
+			// them, and compare on a path-segment boundary (app != application).
+			for _, p := range paths {
+				if scope == "" || p == scope || strings.HasPrefix(p, scope+"/") {
+					matches = append(matches, p)
+				}
+			}
 		}
 		return matches, nil
 	}
@@ -66,18 +84,49 @@ func recommendationDirectory(ws *core.Workspace) *core.Directory {
 
 // runRecommend scans the workspace with each registry entry's recommendation
 // function. Skips already-installed modules. Returns the matches
-// sorted by module name. Used by `dagger setup` and `dagger mod recommend`.
-func runRecommend(ctx context.Context, dag *dagger.Client) ([]recommendation, error) {
+// sorted by module name. Used by `dagger init` and `dagger mod recommend`.
+func runRecommend(ctx context.Context, dag *dagger.Client, scope string) ([]recommendation, error) {
 	installed, err := installedModuleNames(ctx, dag)
 	if err != nil {
 		return nil, err
 	}
 
-	return recommendModules(ctx, core.NewQuery(dag).CurrentWorkspace(), loadModuleRegistry(), installed)
+	return recommendModules(ctx, core.NewQuery(dag).CurrentWorkspace(), scope, loadModuleRegistry(), installed)
 }
 
-func recommendModules(ctx context.Context, ws *core.Workspace, mods []registryModule, installed map[string]bool) ([]recommendation, error) {
-	ws = ws.WithWorkdir(".")
+// resolveRecommendationPath returns a workspace-root-relative scope. Clean a
+// relative path before adding a leading slash so traversal cannot be hidden by
+// path.Clean clamping an absolute path at the root.
+func resolveRecommendationPath(cwd, selection string) (string, error) {
+	var scope string
+	if strings.HasPrefix(selection, "/") {
+		scope = path.Clean(strings.TrimLeft(selection, "/"))
+	} else {
+		scope = path.Clean(path.Join(strings.TrimLeft(cwd, "/"), selection))
+	}
+	if scope == ".." || strings.HasPrefix(scope, "../") {
+		return "", fmt.Errorf("recommendation path %q is outside the workspace", selection)
+	}
+	return scope, nil
+}
+
+func recommendModules(ctx context.Context, ws *core.Workspace, selection string, mods []registryModule, installed map[string]bool) ([]recommendation, error) {
+	cwd, err := ws.Cwd(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scope, err := resolveRecommendationPath(cwd, selection)
+	if err != nil {
+		return nil, err
+	}
+	exists, err := ws.Directory("/").Exists(ctx, scope)
+	if err != nil {
+		return nil, fmt.Errorf("recommendation path %q: %w", selection, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("recommendation path %q does not exist in the workspace", selection)
+	}
+	ws = ws.WithWorkdir(scope)
 
 	recs := make([]recommendation, 0, len(mods))
 	for _, m := range mods {
@@ -85,7 +134,7 @@ func recommendModules(ctx context.Context, ws *core.Workspace, mods []registryMo
 			continue
 		}
 		// Recommend the module if its function returns matches; report the
-		// lexicographically smallest matched path so output is stable.
+		// shallowest matched path, breaking ties lexicographically.
 		matches, err := m.Recommend(ctx, ws)
 		if err != nil {
 			return nil, fmt.Errorf("recommend %s: %w", m.Name, err)
@@ -93,8 +142,10 @@ func recommendModules(ctx context.Context, ws *core.Workspace, mods []registryMo
 		if len(matches) == 0 {
 			continue
 		}
-		sort.Strings(matches)
-		recs = append(recs, recommendation{Module: m, Match: matches[0]})
+		match := slices.MinFunc(matches, func(a, b string) int {
+			return cmp.Or(cmp.Compare(strings.Count(a, "/"), strings.Count(b, "/")), strings.Compare(a, b))
+		})
+		recs = append(recs, recommendation{Module: m, Match: match})
 	}
 	sort.Slice(recs, func(i, j int) bool { return recs[i].Module.Name < recs[j].Module.Name })
 

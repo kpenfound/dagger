@@ -180,7 +180,7 @@ func offerWorkspaceNextSteps(ctx context.Context, cmd *cobra.Command, connect fu
 				return err
 			}
 			defer closeSession()
-			recs, install, err := planRecommend(ctx, session.Dagger(), ui)
+			recs, install, err := planRecommend(ctx, session.Dagger(), "/", ui)
 			if err != nil || !install {
 				return err
 			}

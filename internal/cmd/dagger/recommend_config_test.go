@@ -85,7 +85,7 @@ func TestModuleRecommendationsInspectContents(t *testing.T) {
 				WithNewFile(prefix+"/setup.cfg", "[mypy]\n[tool:pytest]")
 		}
 	}
-	ws := dir.AsWorkspace(core.DirectoryAsWorkspaceOpts{Cwd: "/python"})
+	ws := dir.AsWorkspace()
 	want := map[string][]string{
 		"mochajs": {"js/.mocharc.json", "package.json"},
 		"mypy":    {"mypy/.mypy.ini", "mypy/setup.cfg", "python/pyproject.toml"},
@@ -104,5 +104,29 @@ func TestModuleRecommendationsInspectContents(t *testing.T) {
 			require.NoError(t, err)
 			require.ElementsMatch(t, expected, matches)
 		})
+	}
+}
+
+// A broken config outside the scope must never reach a content predicate.
+func TestScopedRecommendationsDoNotReadOutsideScope(t *testing.T) {
+	ctx := t.Context()
+	dag, err := dagger.Connect(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dag.Close()) })
+	ws := core.NewQuery(dag).Directory().
+		WithNewFile("app/pyproject.toml", "[tool.ruff]").
+		WithSymlink("missing.toml", "pyproject.toml").
+		WithSymlink("missing.toml", "application/pyproject.toml").
+		AsWorkspace(core.DirectoryAsWorkspaceOpts{Cwd: "/app"})
+	for _, mod := range loadModuleRegistry() {
+		if mod.Name != "ruff" {
+			continue
+		}
+		recs, err := recommendModules(ctx, ws, "", []registryModule{mod}, nil)
+		require.NoError(t, err)
+		require.Len(t, recs, 1)
+		require.Equal(t, "app/pyproject.toml", recs[0].Match)
+		_, err = recommendModules(ctx, ws, "/", []registryModule{mod}, nil)
+		require.ErrorContains(t, err, "pyproject.toml")
 	}
 }

@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/creack/pty"
@@ -68,4 +70,54 @@ func (WorkspaceSuite) TestSetupPromptReadsInputAfterTUI(ctx context.Context, t *
 
 	go console.ExpectEOF()
 	require.Error(t, cmd.Wait(), "declining the prerequisite exits non-zero")
+}
+
+// Init deliberately opts into a whole-workspace scan, even when started below
+// the root. Go and Ruff exercise both filename and content-based markers.
+func (WorkspaceSuite) TestInitRecommendationsFromNestedCwd(ctx context.Context, t *testctx.T) {
+	root := t.TempDir()
+	initGitRepo(ctx, t, root)
+	for name, contents := range map[string]string{
+		"go.mod":                             "module example.com/root\n",
+		"pyproject.toml":                     "[tool.ruff]\n",
+		"app/go.mod":                         "module example.com/app\n",
+		"app/pyproject.toml":                 "[tool.ruff]\n",
+		"app/examples/celery/go.mod":         "module example.com/celery\n",
+		"app/examples/celery/pyproject.toml": "[tool.ruff]\n",
+	} {
+		filename := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(filename), 0o755))
+		require.NoError(t, os.WriteFile(filename, []byte(contents), 0o644))
+	}
+	console, err := newTUIConsole(t, 60*time.Second)
+	require.NoError(t, err)
+	defer console.Close()
+	tty := console.Tty()
+	require.NoError(t, pty.Setsize(tty, &pty.Winsize{Rows: 45, Cols: 140}))
+	cmd := hostDaggerCommand(ctx, t, filepath.Join(root, "app"), "--progress=tty", "init")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	require.NoError(t, cmd.Start())
+	_, err = console.ExpectString("Find and install suitable modules?")
+	require.NoError(t, err)
+	time.Sleep(300 * time.Millisecond)
+	_, err = console.Send("\r")
+	require.NoError(t, err)
+	_, err = console.ExpectString("go: found go.mod")
+	require.NoError(t, err)
+	_, err = console.ExpectString("ruff: found pyproject.toml")
+	require.NoError(t, err)
+	_, err = console.ExpectString("Install selected")
+	require.NoError(t, err)
+	time.Sleep(300 * time.Millisecond)
+	_, err = console.Send("\x1b[C\r") // Skip installation.
+	require.NoError(t, err)
+	_, err = console.ExpectString("Enable cloud checks?")
+	require.NoError(t, err)
+	time.Sleep(300 * time.Millisecond)
+	_, err = console.Send("\x1b[C\r")
+	require.NoError(t, err)
+	go console.ExpectEOF()
+	require.NoError(t, cmd.Wait())
+	require.FileExists(t, filepath.Join(root, "dagger.toml"))
+	require.NoFileExists(t, filepath.Join(root, "app/dagger.toml"))
 }

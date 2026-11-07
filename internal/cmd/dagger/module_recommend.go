@@ -18,7 +18,10 @@ import (
 var moduleRecommendCmd = &cobra.Command{
 	Use:   "recommend",
 	Short: "Find recommended modules and select which modules to install",
-	Long: `Find modules for the current workspace and select which modules to install.
+	Long: `Find modules in the current working directory's subtree and select which modules to install.
+Use --path to scan another subtree: relative paths resolve from the current working
+directory, and /-prefixed paths resolve from the workspace root. Use --path / to
+scan the whole workspace. Matched paths are shown relative to the workspace root.
 Already installed modules are skipped.
 
 Use --auto-apply to install all recommended modules without a prompt.
@@ -32,14 +35,19 @@ non-interactive mode.`,
 
 func init() {
 	moduleRecommendCmd.RunE = runModuleRecommend
+	moduleRecommendCmd.Flags().String("path", "", "Subpath to scan (defaults to the current working directory; / selects the whole workspace)")
 }
 
 func runModuleRecommend(cmd *cobra.Command, _ []string) error {
+	scope, err := cmd.Flags().GetString("path")
+	if err != nil {
+		return err
+	}
 	return withEngine(cmd.Context(), client.Params{
 		SkipWorkspaceModules: true,
 	}, func(ctx context.Context, engineClient *client.Client) error {
 		dag := engineClient.Dagger()
-		recs, install, err := planRecommend(ctx, dag, nil)
+		recs, install, err := planRecommend(ctx, dag, scope, nil)
 		if err != nil || !install {
 			return err
 		}
@@ -51,8 +59,8 @@ func runModuleRecommend(cmd *cobra.Command, _ []string) error {
 // form) whether to install them. Workspace setup and module recommend share it.
 // The caller owns the engine session and installs the selected modules. ui
 // may be nil; dagger init passes its view to show progress and outcomes.
-func planRecommend(ctx context.Context, dag *dagger.Client, ui *initUI) ([]recommendation, bool, error) {
-	recs, err := findRecommendations(ctx, dag, ui)
+func planRecommend(ctx context.Context, dag *dagger.Client, scope string, ui *initUI) ([]recommendation, bool, error) {
+	recs, err := findRecommendations(ctx, dag, scope, ui)
 	if err != nil {
 		return nil, false, err
 	}
@@ -75,11 +83,11 @@ func planRecommend(ctx context.Context, dag *dagger.Client, ui *initUI) ([]recom
 	return recs, true, nil
 }
 
-func findRecommendations(ctx context.Context, dag *dagger.Client, ui *initUI) (_ []recommendation, rerr error) {
+func findRecommendations(ctx context.Context, dag *dagger.Client, scope string, ui *initUI) (_ []recommendation, rerr error) {
 	ctx, span := Tracer().Start(ctx, "Find recommended modules", telemetry.Reveal(), telemetry.Encapsulate())
 	defer telemetry.EndWithCause(span, &rerr)
 	ui.modulesFinding(spanIDOf(span))
-	return runRecommend(ctx, dag)
+	return runRecommend(ctx, dag, scope)
 }
 
 // installRecommended installs the selected modules in the caller's session.
